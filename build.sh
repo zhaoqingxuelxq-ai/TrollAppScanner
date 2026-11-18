@@ -113,6 +113,19 @@ if [ "$SIGNED" -eq 0 ]; then
   codesign -f -s - "$BINARY" 2>/dev/null || true
 fi
 
+# 嵌套二进制（Frameworks / PlugIns）也要签一遍。
+# 现在没有依赖所以是空操作，但以后加了 framework 或 appex 忘了签，
+# 装到设备上就是 dyld 加载失败，很难查。
+if [ "$HAVE_LDID" -eq 1 ]; then
+  NESTED=0
+  while IFS= read -r -d '' nested; do
+    if ldid -S"$ENTITLEMENTS" "$nested" 2>/dev/null; then
+      NESTED=$((NESTED + 1))
+    fi
+  done < <(find "$PAYLOAD/$TARGET.app/Frameworks" "$PAYLOAD/$TARGET.app/PlugIns" -type f -print0 2>/dev/null)
+  echo "    嵌套二进制已签名：$NESTED 个"
+fi
+
 # 自检：entitlements 必须真的写进了二进制
 echo "    ---- 二进制内实际 entitlements ----"
 ENT_TEXT=""

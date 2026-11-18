@@ -102,10 +102,21 @@ enum MachO {
                 slices.append((cpu, sub, fileOffset))
                 cursor += archSize
             }
+            guard !slices.isEmpty else { return nil }
+
+            // 架构列表去重（同一个 cpu 可能被重复登记）
+            var archList: [String] = []
             for slice in slices {
-                result.architectures.append(cpuName(slice.cpu, slice.sub))
+                let name = cpuName(slice.cpu, slice.sub)
+                if !archList.contains(name) { archList.append(name) }
             }
-            for slice in slices {
+            result.architectures = archList
+
+            // 设备上真正执行的是 arm64 / arm64e 切片，加密状态与签名都以它为准，
+            // 不能像原来那样「谁先解析成功就用谁」——fat 表顺序不保证 arm64 在前
+            let preferred = slices.filter { $0.cpu == 0x0100000C }
+                + slices.filter { $0.cpu != 0x0100000C }
+            for slice in preferred {
                 if let single = parseSlice(handle: handle, base: slice.off) {
                     result.encrypted = single.encrypted
                     result.dylibs = single.dylibs
@@ -387,6 +398,47 @@ enum AppScannerEngine {
         return output.sorted()
     }
 
+    /// 收集 bundle 内的嵌套可执行文件：App 扩展、Frameworks 里的 dylib / framework 主二进制。
+    /// 原来只扫主二进制，注入到扩展或框架里的 tweak 会整条漏掉。
+    static func nestedBinaries(bundlePath: String) -> [(label: String, path: String)] {
+        var output: [(label: String, path: String)] = []
+        var seen = Set<String>()
+
+        func add(_ label: String, _ path: String) {
+            guard !seen.contains(path), fm.fileExists(atPath: path) else { return }
+            seen.insert(path)
+            output.append((label, path))
+        }
+
+        // 1. 扩展 PlugIns/*.appex/<CFBundleExecutable>
+        for extensionPath in subBundles(in: bundlePath + "/PlugIns", suffix: ".appex") {
+            let extName = (extensionPath as NSString).lastPathComponent
+            if let plist = readPlist(extensionPath + "/Info.plist"),
+               let executable = plist["CFBundleExecutable"] as? String, !executable.isEmpty {
+                add(extName, extensionPath + "/" + executable)
+            }
+        }
+
+        // 2. Frameworks/ 下的 dylib 与 framework 主二进制
+        let frameworks = bundlePath + "/Frameworks"
+        guard let items = try? fm.contentsOfDirectory(atPath: frameworks) else { return output }
+        for name in items.sorted() {
+            let full = frameworks + "/" + name
+            if name.hasSuffix(".dylib") {
+                add(name, full)
+            } else if name.hasSuffix(".framework") {
+                let binaryName = (name as NSString).deletingPathExtension
+                add(name, full + "/" + binaryName)
+                if let subs = try? fm.contentsOfDirectory(atPath: full) {
+                    for sub in subs where sub.hasSuffix(".dylib") {
+                        add(name + "/" + sub, full + "/" + sub)
+                    }
+                }
+            }
+        }
+        return output
+    }
+
     // MARK: 数据容器映射
 
     static func buildContainerMap() -> [String: String] {
@@ -423,6 +475,7 @@ enum AppScannerEngine {
         let bundleName = plist["CFBundleName"] as? String ?? ""
         let displayName = plist["CFBundleDisplayName"] as? String ?? ""
         record.name = !displayName.isEmpty ? displayName : (!bundleName.isEmpty ? bundleName : folderName)
+        record.displayName = record.name
 
         record.version = plist["CFBundleShortVersionString"] as? String ?? "-"
         record.build = plist["CFBundleVersion"] as? String ?? "-"
@@ -481,6 +534,29 @@ enum AppScannerEngine {
                         record.externalLibs.append(library)
                     }
                 }
+            }
+
+            // 嵌套二进制：扩展 / Frameworks 里被注入的 tweak 也不能漏
+            var nestedHitLabels: [String] = []
+            for nested in nestedBinaries(bundlePath: bundlePath) {
+                guard let macho = MachO.parse(path: nested.path) else { continue }
+                var hit = false
+                for library in macho.dylibs {
+                    if isInjectedLibrary(library) {
+                        if !record.injectedLibs.contains(library) {
+                            record.injectedLibs.append(library)
+                        }
+                        hit = true
+                    } else if isExternalLibrary(library), !record.externalLibs.contains(library) {
+                        record.externalLibs.append(library)
+                    }
+                }
+                if hit, !nestedHitLabels.contains(nested.label) {
+                    nestedHitLabels.append(nested.label)
+                }
+            }
+            if !nestedHitLabels.isEmpty {
+                record.notes.append("注入来自子包：" + nestedHitLabels.joined(separator: "、"))
             }
         }
 
@@ -581,17 +657,45 @@ enum AppScannerEngine {
         return nil
     }
 
+    /// 强标记：词本身足够独特，只要出现在路径里就算命中
+    /// （越狱根目录、注入框架的固定安装位置）
+    static let strongInjectionMarkers: [String] = [
+        "/var/jb/",
+        ".jbroot",
+        "/library/mobilesubstrate/dynamiclibraries/",
+        "tweakinject",
+        "mobilesubstrate",
+        "libsubstrate",
+        "libhooker",
+        "ellekit",
+        "preferenceloader",
+        "rocketbootstrap",
+        "libkrw",
+        "libcephei"
+    ]
+
+    /// 弱标记：名字太普通，必须整个文件名精确命中才算
+    /// 之前用 contains("applist") / contains("flex") 会把自带同名类库的正常 App 误标红
+    static let weakInjectionNames: Set<String> = [
+        "substrate.dylib",
+        "libapplist.dylib",
+        "libflex.dylib",
+        "libcolorpicker.dylib",
+        "libpassby.dylib",
+        "cycript"
+    ]
+
     static func isInjectedLibrary(_ path: String) -> Bool {
         let lower = path.lowercased()
-        let markers = [
-            "tweakinject", "mobilesubstrate", "libsubstrate", "substrate",
-            "libhooker", "ellekit", "/var/jb/", ".jbroot", "preferenceloader",
-            "libkrw", "libflex", "/flex", "frida", "cycript", "libcephei",
-            "rocketbootstrap", "libcolorpicker", "applist"
-        ]
-        for marker in markers where lower.contains(marker) {
+        guard !lower.isEmpty else { return false }
+
+        for marker in strongInjectionMarkers where lower.contains(marker) {
             return true
         }
+
+        let fileName = (lower as NSString).lastPathComponent
+        if weakInjectionNames.contains(fileName) { return true }
+
         return false
     }
 

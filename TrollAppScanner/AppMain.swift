@@ -36,11 +36,11 @@ final class ScannerModel: ObservableObject {
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
+            // 注意：AppScannerEngine 的进度回调已经内部派发到主线程，
+            // 这里不能再包一层 main.async，否则文字滞后、进度条会回跳
             let result = AppScannerEngine.scan(options: ScanOptions()) { value, text in
-                DispatchQueue.main.async {
-                    self.progress = value
-                    self.status = text
-                }
+                self.progress = value
+                self.status = text
             }
             DispatchQueue.main.async {
                 self.apps = result
