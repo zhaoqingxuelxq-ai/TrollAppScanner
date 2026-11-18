@@ -150,9 +150,21 @@ struct ContentView: View {
     @State private var query: String = ""
     @State private var filter: FilterMode = .all
     @State private var sort: SortMode = .size
-    @State private var shareItems: [Any] = []
-    @State private var showShare: Bool = false
-    @State private var showDiagnostics: Bool = false
+
+    // 分享面板改用 item 驱动。
+    // 之前是 `showShare: Bool` + `shareItems: [Any]` 两个独立状态：如果 Exporter 返回 nil，
+    // shareItems 还是空的，而 UIActivityViewController 拿到空 activityItems 会直接抛
+    // NSInvalidArgumentException。就算不崩，也是点了完全没反应。现在用 item 保证
+    // 「面板出现」和「有内容」是同一件事。
+    // 分享面板和诊断页共用同一个 sheet 槽位。
+    //
+    // SwiftUI 里同一个 View 上挂多个 `.sheet(...)`，只有最后一个会生效 ——
+    // 之前是 `sheet(share)` + `sheet(diagnostics)` 两个并列，结果诊断页那个
+    // 把分享面板整个盖掉了，所以导出永远是「点了没反应」。
+    // 现在收成一个枚举驱动的单 sheet，两个面板都能正常弹。
+    @State private var activeSheet: ActiveSheet?
+    @State private var alertText: String = ""
+    @State private var showAlert: Bool = false
 
     var body: some View {
         NavigationView {
@@ -175,7 +187,7 @@ struct ContentView: View {
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button {
-                        showDiagnostics = true
+                        activeSheet = .diagnostics
                     } label: {
                         Image(systemName: "stethoscope")
                     }
@@ -203,16 +215,29 @@ struct ContentView: View {
                         } label: {
                             Label("导出文本报告", systemImage: "doc.plaintext")
                         }
+                        Divider()
+                        Button {
+                            openExportFolder()
+                        } label: {
+                            Label("在 Filza 里打开导出目录", systemImage: "folder")
+                        }
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
                 }
             }
-            .sheet(isPresented: $showShare) {
-                ShareSheet(items: shareItems)
+            .sheet(item: $activeSheet) { sheet in
+                switch sheet {
+                case .share(let url):
+                    ShareSheet(items: [url])
+                case .diagnostics:
+                    DiagnosticsView()
+                }
             }
-            .sheet(isPresented: $showDiagnostics) {
-                DiagnosticsView()
+            .alert(isPresented: $showAlert) {
+                Alert(title: Text("导出失败"),
+                      message: Text(alertText),
+                      dismissButton: .default(Text("知道了")))
             }
             .onAppear {
                 Boot.log("2) ContentView.onAppear（界面构建完成，没有崩）")
@@ -469,10 +494,30 @@ struct ContentView: View {
     // MARK: 导出
 
     private func export(_ format: ExportFormat) {
-        guard !model.apps.isEmpty else { return }
-        if let url = Exporter.write(apps: model.apps, format: format) {
-            shareItems = [url]
-            showShare = true
+        switch Exporter.write(apps: model.apps, format: format) {
+        case .ok(let url):
+            Boot.log("导出 \(format.displayName) 成功 -> \(url.path)")
+            activeSheet = .share(url)
+        case .failed(let reason):
+            Boot.log("导出 \(format.displayName) 失败 -> \(reason)")
+            alertText = reason
+            showAlert = true
+        }
+    }
+
+    /// 导出目录直接用 Filza 打开，省得用户拿不到文件。
+    /// Filza 没装时给出确切路径，用「文件」App 也能进去。
+    private func openExportFolder() {
+        let (dir, _) = Exporter.writableDirectory()
+        Boot.log("打开导出目录 -> \(dir.path)")
+        PathOpener.open(dir.path) { ok in
+            guard !ok else { return }
+            DispatchQueue.main.async {
+                alertText = "没能唤起 Filza（可能没装，或 scheme 不被接受）。\n\n"
+                    + "导出目录在：\n\(dir.path)\n\n"
+                    + "用「文件」App 或 Filza 手动进这个路径也能拿到导出的文件。"
+                showAlert = true
+            }
         }
     }
 }
@@ -600,6 +645,21 @@ struct FilterChip: View {
 }
 
 // MARK: - 分享面板
+
+/// 单一 sheet 槽位。
+/// SwiftUI 同一个 View 只认最后一个 `.sheet`，所以这里合并成一个枚举，
+/// 用 `.sheet(item:)` 分发，保证分享面板和诊断页互不遮挡。
+enum ActiveSheet: Identifiable {
+    case share(URL)
+    case diagnostics
+
+    var id: String {
+        switch self {
+        case .share(let url): return "share-\(url.lastPathComponent)"
+        case .diagnostics:    return "diagnostics"
+        }
+    }
+}
 
 struct ShareSheet: UIViewControllerRepresentable {
     let items: [Any]

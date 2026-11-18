@@ -141,13 +141,14 @@ struct AppDetailView: View {
 
     @ViewBuilder
     private var pathSection: some View {
-        Section(header: Text("路径")) {
-            CopyRow(title: "安装包路径", value: app.bundlePath)
+        Section(header: Text("路径"),
+                footer: Text("点向右的箭头直接用 Filza 跳到该位置。没装 Filza 会自动试 Santander，都不行就把路径复制到剪贴板。")) {
+            PathRow(title: "安装包路径", value: app.bundlePath)
             if let container = app.containerPath {
-                CopyRow(title: "数据容器", value: container)
+                PathRow(title: "数据容器", value: container)
             }
             if !app.executable.isEmpty {
-                CopyRow(title: "可执行文件", value: app.bundlePath + "/" + app.executable)
+                PathRow(title: "可执行文件", value: app.bundlePath + "/" + app.executable)
             }
         }
     }
@@ -382,6 +383,81 @@ struct CopyRow: View {
     }
 }
 
+// MARK: - 路径行（复制 + 跳 Filza）
+
+struct PathRow: View {
+    let title: String
+    let value: String
+
+    @State private var copied = false
+    @State private var hint: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+
+            HStack(alignment: .top, spacing: 8) {
+                Text(value)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button {
+                    UIPasteboard.general.string = value
+                    copied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                        copied = false
+                    }
+                } label: {
+                    Image(systemName: copied ? "checkmark.circle.fill" : "doc.on.doc")
+                        .font(.system(size: 13))
+                        .foregroundColor(copied ? Color.green : Color.accentColor)
+                }
+                .buttonStyle(PlainButtonStyle())
+
+                Button {
+                    openInFilza()
+                } label: {
+                    Image(systemName: "arrow.up.forward.app")
+                        .font(.system(size: 14))
+                        .foregroundColor(Color.accentColor)
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+
+            if let hint = hint {
+                Text(hint)
+                    .font(.system(size: 10.5))
+                    .foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func openInFilza() {
+        // 可执行文件是文件不是目录，Filza 的 view/ 进不去，退到它的上级目录
+        var target = value
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: target, isDirectory: &isDir), !isDir.boolValue {
+            target = (target as NSString).deletingLastPathComponent
+        }
+
+        PathOpener.open(target) { ok in
+            guard !ok else { return }
+            DispatchQueue.main.async {
+                UIPasteboard.general.string = target
+                hint = "没唤起 Filza，路径已复制"
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    hint = nil
+                }
+            }
+        }
+    }
+}
+
 // MARK: - 原始 Info.plist
 
 struct RawPlistView: View {
@@ -471,7 +547,8 @@ struct DiagnosticsView: View {
 
     @ViewBuilder
     private var entitlementsSection: some View {
-        Section(header: Text("自身 Entitlements")) {
+        Section(header: Text("自身 Entitlements"),
+                footer: Text("这里是从安装包二进制里读出来的签名内容。如果显示 NO 但上面 /Applications 可读，说明权限其实已经生效了，只是签名没解析到 —— 以「越界读取能力」那一栏为准。")) {
             statusRow("com.apple.private.security.no-sandbox", info.hasNoSandbox)
             statusRow("platform-application", info.hasPlatformApp)
             if !info.entitlementKeys.isEmpty {

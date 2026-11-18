@@ -34,6 +34,19 @@ private func be32(_ data: Data, _ offset: Int) -> UInt32 {
     return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
 }
 
+/// 小端读 32 位。
+/// Mach-O 的 FAT 头是大端（用 be32），但 arm64 / armv7 的切片内部字段全是小端，
+/// 两者不能混用 —— 混了就会出现「magic 认得出来、ncmds 却是天文数字」的情况。
+private func le32(_ data: Data, _ offset: Int) -> UInt32 {
+    let start = data.startIndex
+    guard offset >= 0, start + offset + 4 <= data.endIndex else { return 0 }
+    let b0 = UInt32(data[start + offset])
+    let b1 = UInt32(data[start + offset + 1])
+    let b2 = UInt32(data[start + offset + 2])
+    let b3 = UInt32(data[start + offset + 3])
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+}
+
 private func be64(_ data: Data, _ offset: Int) -> UInt64 {
     let start = data.startIndex
     guard offset >= 0, start + offset + 8 <= data.endIndex else { return 0 }
@@ -148,7 +161,9 @@ enum MachO {
             result.minOSVersion = single.minOSVersion
             result.sdkVersion = single.sdkVersion
             result.rpaths = single.rpaths
-            result.architectures = [cpuName(be32(header, 4), be32(header, 8))]
+            // cputype / cpusubtype 也是小端存的，用 be32 读会得到 0x0C000001 这种垃圾，
+            // 架构名会显示成 cpu_c000001
+            result.architectures = [cpuName(le32(header, 4), le32(header, 8))]
         } else {
             return nil
         }
@@ -157,18 +172,32 @@ enum MachO {
 
     private static func parseSlice(handle: FileHandle, base: Int) -> MachOResult? {
         guard let header = readBytes(handle, offset: base, length: 32), header.count >= 28 else { return nil }
-        let magic = be32(header, 0)
+
+        // ⚠️ 字节序必须按 magic 判断，不能一律按大端读。
+        //
+        // arm64 / armv7 的 Mach-O 都是小端：文件里 ncmds=47 存的是 `2F 00 00 00`。
+        // 之前这里用 be32（大端）读，得到 0x2F000000 = 788529152，立刻撞上下面
+        // `ncmds < 100000` 的护栏返回 nil —— 结果就是**所有 arm64 安装包的二进制信息
+        // 全解析不出来**：UUID / 编译 SDK / 依赖库 / 加密状态 / LC_CODE_SIGNATURE 都是空的，
+        // 连带 entitlements 也读不到（诊断页显示「未解析到签名信息」就是这么来的）。
+        let magicLE = le32(header, 0)
         var is64 = false
-        if magic == MH_MAGIC_64 || magic == MH_CIGAM_64 {
-            is64 = true
-        } else if magic == MH_MAGIC || magic == MH_CIGAM {
-            is64 = false
-        } else {
+        var littleEndian = true
+        switch magicLE {
+        case MH_MAGIC_64:  is64 = true;  littleEndian = true
+        case MH_MAGIC:     is64 = false; littleEndian = true
+        case MH_CIGAM_64:  is64 = true;  littleEndian = false
+        case MH_CIGAM:     is64 = false; littleEndian = false
+        default:
             return nil
         }
 
-        let ncmds = Int(be32(header, 16))
-        let sizeofcmds = Int(be32(header, 20))
+        func rd(_ data: Data, _ offset: Int) -> UInt32 {
+            littleEndian ? le32(data, offset) : be32(data, offset)
+        }
+
+        let ncmds = Int(rd(header, 16))
+        let sizeofcmds = Int(rd(header, 20))
         guard ncmds > 0, ncmds < 100000, sizeofcmds > 0, sizeofcmds < 8 * 1024 * 1024 else { return nil }
         let headerSize = is64 ? 32 : 28
         guard let body = readBytes(handle, offset: base + headerSize, length: sizeofcmds) else { return nil }
@@ -177,25 +206,25 @@ enum MachO {
         var cursor = 0
         for _ in 0..<ncmds {
             guard cursor + 8 <= body.count else { break }
-            let cmd = be32(body, cursor)
-            let cmdsize = Int(be32(body, cursor + 4))
+            let cmd = rd(body, cursor)
+            let cmdsize = Int(rd(body, cursor + 4))
             guard cmdsize >= 8, cursor + cmdsize <= body.count else { break }
 
             switch cmd {
             case 0x0C, 0x80000018, 0x8000001F, 0x80000023:
-                let nameOffset = Int(be32(body, cursor + 8))
+                let nameOffset = Int(rd(body, cursor + 8))
                 if nameOffset > 0, cursor + nameOffset < body.count {
                     let name = cString(body, cursor + nameOffset)
                     if !name.isEmpty { result.dylibs.append(name) }
                 }
-            case 0x2C:
-                if cursor + 20 <= body.count, be32(body, cursor + 16) != 0 { result.encrypted = true }
-            case 0x21:
-                if cursor + 20 <= body.count, be32(body, cursor + 16) != 0 { result.encrypted = true }
-            case 0x1D:
+            case 0x2C:   // LC_ENCRYPTION_INFO
+                if cursor + 20 <= body.count, rd(body, cursor + 16) != 0 { result.encrypted = true }
+            case 0x21:   // LC_ENCRYPTION_INFO_64
+                if cursor + 20 <= body.count, rd(body, cursor + 16) != 0 { result.encrypted = true }
+            case 0x1D:   // LC_CODE_SIGNATURE
                 if cursor + 16 <= body.count {
-                    result.codeSigOffset = base + Int(be32(body, cursor + 8))
-                    result.codeSigSize = Int(be32(body, cursor + 12))
+                    result.codeSigOffset = base + Int(rd(body, cursor + 8))
+                    result.codeSigSize = Int(rd(body, cursor + 12))
                 }
             case 0x1B:   // LC_UUID
                 if cursor + 24 <= body.count {
@@ -203,19 +232,19 @@ enum MachO {
                 }
             case 0x32:   // LC_BUILD_VERSION（Xcode 10+ 产出）
                 if cursor + 24 <= body.count {
-                    result.platformLabel = platformName(be32(body, cursor + 8))
-                    result.minOSVersion = versionText(be32(body, cursor + 12))
-                    result.sdkVersion = versionText(be32(body, cursor + 16))
+                    result.platformLabel = platformName(rd(body, cursor + 8))
+                    result.minOSVersion = versionText(rd(body, cursor + 12))
+                    result.sdkVersion = versionText(rd(body, cursor + 16))
                 }
             case 0x25:   // LC_VERSION_MIN_IPHONEOS（老工具链）
                 if cursor + 16 <= body.count {
                     result.platformLabel = "iOS"
-                    result.minOSVersion = versionText(be32(body, cursor + 8))
-                    result.sdkVersion = versionText(be32(body, cursor + 12))
+                    result.minOSVersion = versionText(rd(body, cursor + 8))
+                    result.sdkVersion = versionText(rd(body, cursor + 12))
                 }
             case 0x8000001C:   // LC_RPATH
                 if cursor + 12 <= body.count {
-                    let pathOffset = Int(be32(body, cursor + 8))
+                    let pathOffset = Int(rd(body, cursor + 8))
                     if pathOffset > 0, cursor + pathOffset < body.count {
                         let path = cString(body, cursor + pathOffset)
                         if !path.isEmpty { result.rpaths.append(path) }

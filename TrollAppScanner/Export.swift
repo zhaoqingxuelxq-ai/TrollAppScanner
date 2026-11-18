@@ -6,19 +6,40 @@
 //
 
 import Foundation
+import UIKit
 
 enum ExportFormat {
     case json
     case csv
     case report
+
+    var displayName: String {
+        switch self {
+        case .json:   return "JSON"
+        case .csv:    return "CSV"
+        case .report: return "文本报告"
+        }
+    }
+}
+
+/// 导出结果。
+///
+/// 之前 write() 返回 URL?，失败就 return nil，调用方 `if let url = ...` 直接跳过，
+/// 界面上什么都不发生 —— 用户看到的就是「点了没反应」。
+/// 现在把失败原因带出来，至少能弹个框告诉人卡在哪。
+enum ExportOutcome {
+    case ok(URL)
+    case failed(String)
 }
 
 enum Exporter {
 
     // MARK: 落盘
 
-    static func write(apps: [AppRecord], format: ExportFormat) -> URL? {
-        guard !apps.isEmpty else { return nil }
+    static func write(apps: [AppRecord], format: ExportFormat) -> ExportOutcome {
+        guard !apps.isEmpty else {
+            return .failed("还没有扫描结果，先点「开始扫描」。")
+        }
 
         let stamp = timestamp()
         let fileName: String
@@ -27,7 +48,10 @@ enum Exporter {
         switch format {
         case .json:
             fileName = "AppScanner-\(stamp).json"
-            if let payload = jsonData(apps) { data = payload }
+            guard let payload = jsonData(apps) else {
+                return .failed("JSON 序列化失败：数据里有无法转成 JSON 的字段。")
+            }
+            data = payload
         case .csv:
             fileName = "AppScanner-\(stamp).csv"
             data = csvData(apps)
@@ -36,15 +60,55 @@ enum Exporter {
             data = reportData(apps)
         }
 
-        guard !data.isEmpty else { return nil }
+        guard !data.isEmpty else {
+            return .failed("生成的内容为空。")
+        }
 
-        let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(fileName)
+        let (dir, dirNote) = writableDirectory()
+        let url = dir.appendingPathComponent(fileName)
         do {
             try data.write(to: url, options: .atomic)
-            return url
+            return .ok(url)
         } catch {
-            return nil
+            var message = "写入失败：\(error.localizedDescription)\n目标目录：\(dir.path)"
+            if let note = dirNote { message += "\n探测记录：\(note)" }
+            return .failed(message)
         }
+    }
+
+    /// 找一个真的能写的目录。
+    ///
+    /// 加了 no-sandbox 之后进程不再被容器约束，`NSHomeDirectory()` 和
+    /// `NSTemporaryDirectory()` 在某些环境下会指向意料之外的位置，
+    /// 直接往 tmp 写就可能静默失败。这里按可靠性排序列出候选，
+    /// 逐个真写一个探测文件验证，谁先通过用谁。
+    static func writableDirectory() -> (URL, String?) {
+        let fm = FileManager.default
+        var candidates: [URL] = []
+
+        if let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first {
+            candidates.append(docs.appendingPathComponent("Export", isDirectory: true))
+        }
+        candidates.append(URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Documents/Export", isDirectory: true))
+        candidates.append(URL(fileURLWithPath: "/var/mobile/Documents/Export", isDirectory: true))
+        candidates.append(URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("Export", isDirectory: true))
+        candidates.append(URL(fileURLWithPath: "/tmp/AppScannerExport", isDirectory: true))
+
+        var notes: [String] = []
+        for dir in candidates {
+            do {
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+                let probe = dir.appendingPathComponent(".write_test")
+                try Data([0x31]).write(to: probe)
+                try? fm.removeItem(at: probe)
+                return (dir, notes.isEmpty ? nil : notes.joined(separator: " | "))
+            } catch {
+                notes.append("\(dir.path) -> \(error.localizedDescription)")
+            }
+        }
+        return (URL(fileURLWithPath: NSTemporaryDirectory()), notes.joined(separator: " | "))
     }
 
     // MARK: JSON
@@ -290,5 +354,56 @@ enum Exporter {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         return formatter.string(from: Date())
+    }
+}
+
+// MARK: - 用 Filza / Santander 打开路径
+
+enum PathOpener {
+
+    /// Filza 的 URL scheme 在不同版本上接受的写法不一样：
+    ///   filza://view/var/containers/...   多数版本认这个，会直接跳到该目录
+    ///   filza://var/containers/...        老版本认这个
+    /// Santander 用 santander://... 作为兜底。
+    /// 路径里的中文和空格必须转义，否则 URL(string:) 会返回 nil。
+    static func urls(for path: String) -> [URL] {
+        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        let withoutLeadingSlash = trimmed.hasPrefix("/") ? String(trimmed.dropFirst()) : trimmed
+        let encoded = withoutLeadingSlash
+            .addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? withoutLeadingSlash
+
+        var list: [URL] = []
+        for raw in ["filza://view/\(encoded)", "filza://\(encoded)", "santander://\(encoded)"] {
+            if let url = URL(string: raw) { list.append(url) }
+        }
+        return list
+    }
+
+    /// 逐个 scheme 试着打开，第一个成功的就算成功。
+    /// 不能用 canOpenURL 判断 —— 那需要在 Info.plist 里登记 LSApplicationQueriesSchemes，
+    /// 而且登记漏了就会永远返回 false，反而误判「没装 Filza」。
+    static func open(_ path: String, completion: @escaping (Bool) -> Void) {
+        let list = urls(for: path)
+        guard !list.isEmpty else {
+            completion(false)
+            return
+        }
+
+        func attempt(_ index: Int) {
+            guard index < list.count else {
+                completion(false)
+                return
+            }
+            UIApplication.shared.open(list[index], options: [:]) { success in
+                if success {
+                    completion(true)
+                } else {
+                    attempt(index + 1)
+                }
+            }
+        }
+        attempt(0)
     }
 }
