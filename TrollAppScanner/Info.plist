@@ -17,9 +17,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.2.0</string>
+	<string>1.3.0</string>
 	<key>CFBundleVersion</key>
-	<string>4</string>
+	<string>5</string>
 	<key>CFBundleSupportedPlatforms</key>
 	<array>
 		<string>iPhoneOS</string>
@@ -40,11 +40,12 @@
 	<string>14.0</string>
 	<key>MinimumOSVersion</key>
 	<string>14.0</string>
-	<key>UIApplicationSceneManifest</key>
-	<dict>
-		<key>UIApplicationSupportsMultipleScenes</key>
-		<false/>
-	</dict>
+	<!--
+	  这里原本有 UIApplicationSceneManifest。
+	  有它的话，iOS 13+ 会走 scene 化启动，AppDelegate 里自建的 window
+	  根本不会被挂上去 —— 表现就是白屏。本工程用的是 AppDelegate +
+	  手写 UIWindow 的 legacy 路径，所以这个 key 必须删掉。
+	-->
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>

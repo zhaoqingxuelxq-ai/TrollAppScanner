@@ -2,6 +2,20 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!--
+	  只保留「越出沙盒读全盘」真正需要的两项。
+
+	  v1.2.0 及之前的版本还塞了 get-task-allow / dynamic-codesigning /
+	  run-unsigned-code / task_for_pid-allow / com.apple.private.cs.debugger /
+	  mobileinstall.allowedSPI / storage.* / absolute-path 例外。
+
+	  其中 get-task-allow=true 是最要命的一条：它把二进制标记成「可被调试」，
+	  而调试类 entitlement 必须由合法的 Apple 开发者证书链背书。TrollStore 装上去的
+	  是 ldid 自签名，没有证书链，AMFI 在 exec 阶段就会把这个组合判为非法直接杀进程，
+	  表现就是「点图标 → 白屏（SpringBoard 的启动占位）→ 闪退」，连 main() 都进不去。
+
+	  这几项对「扫描安装包」没有任何用处，全删。
+	-->
 	<key>application-identifier</key>
 	<string>com.troll.appscanner</string>
 	<key>com.apple.developer.team-identifier</key>
@@ -9,39 +23,6 @@
 	<key>platform-application</key>
 	<true/>
 	<key>com.apple.private.security.no-sandbox</key>
-	<true/>
-	<key>com.apple.private.security.storage.AppDataContainers</key>
-	<true/>
-	<key>com.apple.private.security.storage.MobileDocuments</key>
-	<true/>
-	<key>com.apple.security.exception.files.absolute-path.read-only</key>
-	<array>
-		<string>/</string>
-	</array>
-	<key>com.apple.security.exception.files.absolute-path.read-write</key>
-	<array>
-		<string>/var/mobile/</string>
-		<string>/tmp/</string>
-	</array>
-	<key>com.apple.private.mobileinstall.allowedSPI</key>
-	<array>
-		<string>Lookup</string>
-		<string>Install</string>
-		<string>Uninstall</string>
-		<string>Browse</string>
-		<string>LookupForLaunchServices</string>
-	</array>
-	<key>get-task-allow</key>
-	<true/>
-	<key>dynamic-codesigning</key>
-	<true/>
-	<key>run-unsigned-code</key>
-	<true/>
-	<key>com.apple.private.skip-library-validation</key>
-	<true/>
-	<key>com.apple.private.cs.debugger</key>
-	<true/>
-	<key>task_for_pid-allow</key>
 	<true/>
 </dict>
 </plist>

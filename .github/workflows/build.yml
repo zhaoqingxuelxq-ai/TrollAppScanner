@@ -68,35 +68,50 @@ jobs:
       - name: 校验产物
         run: |
           set -e
-          [ -f AppScanner.tipa ] || { echo "没有产出 tipa"; exit 1; }
-          ls -lh AppScanner.tipa
-          echo "---- tipa 内容 ----"
-          unzip -l AppScanner.tipa
+          [ -f AppScanner.tipa ] || { echo "没有产出主包"; exit 1; }
+          [ -f AppScanner-Probe.tipa ] || { echo "没有产出探针包"; exit 1; }
+          ls -lh AppScanner.tipa AppScanner-Probe.tipa
 
           rm -rf /tmp/verify && mkdir -p /tmp/verify
           unzip -q AppScanner.tipa -d /tmp/verify
           BIN=/tmp/verify/Payload/AppScanner.app/AppScanner
+          PLIST=/tmp/verify/Payload/AppScanner.app/Info.plist
 
           echo "---- 主二进制架构 ----"
           lipo -info "$BIN"
 
           echo "---- 编译 SDK / 最低系统 ----"
           otool -l "$BIN" | grep -A4 LC_BUILD_VERSION || true
+          MINOS="$(otool -l "$BIN" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')"
+          echo "minos=$MINOS"
+          [ -n "$MINOS" ] || { echo "::error::读不到 minos"; exit 1; }
+          [ "${MINOS%%.*}" -le 16 ] || { echo "::error::minos $MINOS 高于 iOS 16.3.1"; exit 1; }
 
-          echo "---- Swift 运行时是否已嵌入 ----"
-          if [ -d /tmp/verify/Payload/AppScanner.app/Frameworks ]; then
-            ls /tmp/verify/Payload/AppScanner.app/Frameworks | head -20
-          else
-            echo "::warning::没有 Frameworks 目录，依赖系统 Swift 运行时"
+          echo "---- Info.plist 关键项 ----"
+          if plutil -convert xml1 -o - "$PLIST" 2>/dev/null | grep -q "UIApplicationSceneManifest"; then
+            echo "::error::Info.plist 里还残留 UIApplicationSceneManifest，AppDelegate 自建的 window 不会显示（白屏）"
+            exit 1
           fi
+          echo "无 SceneManifest（走 legacy AppDelegate 路径）"
 
-          echo "---- 二进制内 entitlements ----"
+          echo "---- 主二进制 entitlements ----"
           ldid -e "$BIN" | tee /tmp/ent.txt
           grep -q "no-sandbox" /tmp/ent.txt
           grep -q "platform-application" /tmp/ent.txt
-          echo "entitlements 校验通过"
+          if grep -q "get-task-allow" /tmp/ent.txt; then
+            echo "::error::entitlements 里还有 get-task-allow，TrollStore 上会被 AMFI 在 exec 阶段杀掉（白屏闪退）"
+            exit 1
+          fi
+          echo "entitlements 校验通过（含 no-sandbox / platform-application，无 get-task-allow）"
 
-          shasum -a 256 AppScanner.tipa | tee AppScanner.tipa.sha256
+          echo "---- 探针包 Info.plist ----"
+          rm -rf /tmp/verifyp && mkdir -p /tmp/verifyp
+          unzip -q AppScanner-Probe.tipa -d /tmp/verifyp
+          plutil -convert xml1 -o - /tmp/verifyp/Payload/AppScannerProbe.app/Info.plist | grep -A1 "TASProbe"
+          ldid -e /tmp/verifyp/Payload/AppScannerProbe.app/AppScanner | grep -q "no-sandbox"
+          echo "探针包校验通过"
+
+          shasum -a 256 AppScanner.tipa AppScanner-Probe.tipa | tee AppScanner.tipa.sha256
 
       - name: 上传 tipa
         uses: actions/upload-artifact@v4
@@ -104,6 +119,7 @@ jobs:
           name: TrollAppScanner-tipa
           path: |
             AppScanner.tipa
+            AppScanner-Probe.tipa
             AppScanner.tipa.sha256
           if-no-files-found: error
           retention-days: 30

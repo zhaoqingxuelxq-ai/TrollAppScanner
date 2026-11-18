@@ -8,18 +8,75 @@
 import SwiftUI
 import UIKit
 
-@main
-struct TrollAppScannerApp: App {
-    init() {
-        Boot.log("1) App.init 进入（dyld 已通过，Swift 代码在跑）")
-        Boot.log("   bundle=\(Bundle.main.bundlePath)")
-        Boot.log("   system=\(UIDevice.current.systemVersion) model=\(UIDevice.current.model)")
-    }
+// MARK: - 程序入口
+//
+// 为什么不用 SwiftUI 的 @main App + WindowGroup
+// ---------------------------------------------------------------
+// 1.0 ~ 1.2 三个版本都用 @main struct: App，结果在 iOS 16.3.1 + TrollStore 上全部
+// 「点图标 → 白屏 → 闪退」，界面里一个字都看不到。改代码内容（自动扫描 → 手动扫描）
+// 没有任何变化，说明问题不在业务逻辑，而在更靠前的启动链路。
+//
+// 现在换回最原始的 UIApplicationDelegate + 手写 UIWindow：
+//   1. 不依赖 UIApplicationSceneManifest。有 manifest 时，AppDelegate 里自建的
+//      window 是不会被显示的（iOS 13 起 scene 接管），正好是白屏的表现。
+//   2. 不依赖 SwiftUI 的 App / Scene 生命周期，SwiftUI 只当一个普通 View，
+//      用 UIHostingController 塞进 window，出问题也不会连累启动。
+//   3. main() 第一行就落盘日志，能把「根本没进 Swift 代码」和「进了之后才崩」分开。
 
-    var body: some Scene {
-        WindowGroup {
-            ContentView()
+// 顶层函数：作为 C 函数指针交给 NSSetUncaughtExceptionHandler。
+// 写成闭包会因为「捕获上下文」而无法转换成 C 函数指针（编译期就报错）。
+private func tasUncaughtExceptionHandler(_ exception: NSException) {
+    let stack = exception.callStackSymbols.joined(separator: "\n")
+    Boot.log("!! NSException \(exception.name.rawValue): \(exception.reason ?? "-")\n\(stack)")
+}
+
+@main
+final class AppDelegate: UIResponder, UIApplicationDelegate {
+
+    var window: UIWindow?
+
+    static func main() {
+        // 这一行能写出来，就说明：dyld 已加载完、签名校验已通过、进程活着、
+        // Swift 运行时正常拉起。如果设备上连这行日志都没有，问题一定在
+        // 签名 / 打包 / 安装环节，改再多代码也没用。
+        Boot.log("0) main() 进入 · iOS \(UIDevice.current.systemVersion) · \(UIDevice.current.model)")
+        Boot.log("   bundle = \(Bundle.main.bundlePath)")
+        Boot.log("   exe    = \(Bundle.main.executablePath ?? "-")")
+
+        // NSException 能在这里截住并落盘；SIGSEGV / EXC_BAD_ACCESS 截不住，
+        // 但至少能把 ObjC 层的异常原因留下来。
+        // 注意：NSSetUncaughtExceptionHandler 要的是 C 函数指针，不能传捕获上下文的闭包，
+        // 所以这里用顶层函数 tasUncaughtExceptionHandler。
+        NSSetUncaughtExceptionHandler(tasUncaughtExceptionHandler)
+
+        // principalClass 传 nil 表示用 UIApplication 本体，delegate 用本类。
+        // 前提是 Info.plist 里没有 UIApplicationSceneManifest，否则 legacy
+        // 路径下自建的 window 不会显示。
+        UIApplicationMain(CommandLine.argc,
+                          CommandLine.unsafeArgv,
+                          nil,
+                          NSStringFromClass(AppDelegate.self))
+    }
+    func application(_ application: UIApplication,
+                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        Boot.log("1) didFinishLaunching 到达")
+
+        let window = UIWindow(frame: UIScreen.main.bounds)
+
+        // Info.plist 里带 TASProbe=true 的包走探针界面。
+        // 探针界面是纯 UIKit 手写的，不碰 SwiftUI、不碰扫描逻辑，
+        // 用来单独验证「签名 → 安装 → dyld → UIKit」这条链路。
+        if Bundle.main.object(forInfoDictionaryKey: "TASProbe") as? Bool == true {
+            Boot.log("   探针模式（TASProbe=true）")
+            window.rootViewController = UINavigationController(rootViewController: ProbeViewController())
+        } else {
+            window.rootViewController = UIHostingController(rootView: ContentView())
         }
+
+        window.makeKeyAndVisible()
+        self.window = window
+        Boot.log("2) 根视图已挂载，window 可见")
+        return true
     }
 }
 
@@ -552,4 +609,187 @@ struct ShareSheet: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
+// MARK: - 启动探针（纯 UIKit）
+//
+// 这个界面存在的唯一目的：把「哪一环坏了」这件事一次性问清楚。
+//
+//   它能把内容画出来  → 签名、安装、dyld、UIKit 全链路 OK。之后若主界面还闪退，
+//                       就只可能是业务代码，改代码才有意义。
+//   它也白屏闪退      → 问题 100% 在打包 / 签名 / 安装环节，改代码是白费力气。
+//
+// 所以这里刻意不 import 任何业务视图、不读全盘、不碰 SwiftUI。
+
+final class ProbeViewController: UIViewController {
+
+    private let scrollView = UIScrollView()
+    private let stack = UIStackView()
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        title = "启动探针"
+        view.backgroundColor = .systemBackground
+        buildLayout()
+        render()
+        Boot.log("3) 探针界面渲染完成（能看到本页说明启动链路正常）")
+    }
+
+    private func buildLayout() {
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.axis = .vertical
+        stack.spacing = 9
+        stack.alignment = .fill
+
+        view.addSubview(scrollView)
+        scrollView.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            scrollView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            stack.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor, constant: 16),
+            stack.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor, constant: -16),
+            stack.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor, constant: -28),
+            stack.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor, constant: -32)
+        ])
+    }
+
+    // MARK: 渲染
+    //
+    // 刻意不调用 EnvironmentProbe / MachO / CodeSign 里任何解析代码。
+    // 探针页要和业务代码完全隔离，否则「探针自己崩了」会被误判成「链路有问题」。
+    // 用不用得上 entitlements，看能不能读 /Applications 就够了。
+
+    private func render() {
+        let fm = FileManager.default
+
+        addTitle("链路已通")
+        addNote("能看到这一页，说明「签名 → TrollStore 安装 → dyld → UIKit」全部通过。"
+                + "主界面如果还闪退，问题就在业务代码，不在打包。")
+
+        addTitle("设备")
+        addRow("系统版本", "iOS " + UIDevice.current.systemVersion)
+        addRow("设备型号", UIDevice.current.model)
+        addRow("运行 uid", "\(getuid())" + (getuid() == 501 ? "（mobile）" : ""))
+        addRow("App 版本", (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "-")
+        addRow("bundle id", Bundle.main.bundleIdentifier ?? "-")
+        addRow("App 路径", Bundle.main.bundlePath, mono: true)
+
+        addTitle("越界读取能力")
+        addStatus("/Applications", (try? fm.contentsOfDirectory(atPath: "/Applications")) != nil)
+        addStatus("/var/containers/Bundle/Application",
+                  (try? fm.contentsOfDirectory(atPath: "/var/containers/Bundle/Application")) != nil)
+        addStatus("/var/mobile/Containers/Data/Application",
+                  (try? fm.contentsOfDirectory(atPath: "/var/mobile/Containers/Data/Application")) != nil)
+        addNote("三项全 NO，说明 no-sandbox 没生效，主程序扫不到任何东西。")
+
+        addTitle("启动日志")
+        addRow("路径", Boot.docPath, mono: true)
+        addNote(readBootTail())
+    }
+
+    private func readBootTail() -> String {
+        guard let text = try? String(contentsOfFile: Boot.docPath, encoding: .utf8),
+              !text.isEmpty else {
+            return "（读不到 boot.log）"
+        }
+        let limit = 2400
+        if text.count <= limit { return text }
+        return "…（前略）\n" + String(text.suffix(limit))
+    }
+
+    // MARK: 行构造
+
+    private func addTitle(_ text: String) {
+        let label = UILabel()
+        label.text = text
+        label.font = .systemFont(ofSize: 13, weight: .semibold)
+        label.textColor = .secondaryLabel
+        stack.addArrangedSubview(label)
+        stack.setCustomSpacing(14, after: label)
+
+        let line = UIView()
+        line.backgroundColor = .separator
+        line.translatesAutoresizingMaskIntoConstraints = false
+        line.heightAnchor.constraint(equalToConstant: 0.5).isActive = true
+        stack.insertArrangedSubview(line, at: stack.arrangedSubviews.count)
+    }
+
+    private func addRow(_ key: String, _ value: String, mono: Bool = false) {
+        let row = UIStackView()
+        row.axis = .horizontal
+        row.spacing = 8
+        row.alignment = .top
+
+        if !key.isEmpty {
+            let k = UILabel()
+            k.text = key
+            k.font = .systemFont(ofSize: 12)
+            k.textColor = .secondaryLabel
+            k.setContentHuggingPriority(.required, for: .horizontal)
+            k.setContentCompressionResistancePriority(.required, for: .horizontal)
+            row.addArrangedSubview(k)
+        }
+
+        let v = UILabel()
+        v.text = value
+        v.numberOfLines = 0
+        v.font = mono ? .monospacedSystemFont(ofSize: 10.5, weight: .regular)
+                      : .systemFont(ofSize: 12)
+        v.textColor = .label
+        row.addArrangedSubview(v)
+
+        stack.addArrangedSubview(row)
+    }
+
+    private func addStatus(_ name: String, _ ok: Bool) {
+        let row = UIStackView()
+        row.axis = .horizontal
+        row.spacing = 8
+        row.alignment = .top
+
+        let badge = UILabel()
+        badge.text = ok ? "OK" : "NO"
+        badge.font = .monospacedSystemFont(ofSize: 11, weight: .bold)
+        badge.textColor = ok ? .systemGreen : .systemRed
+        badge.setContentHuggingPriority(.required, for: .horizontal)
+        row.addArrangedSubview(badge)
+
+        let label = UILabel()
+        label.text = name
+        label.numberOfLines = 0
+        label.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        label.textColor = .label
+        row.addArrangedSubview(label)
+
+        stack.addArrangedSubview(row)
+    }
+
+    private func addNote(_ text: String) {
+        let box = UIView()
+        box.backgroundColor = .secondarySystemBackground
+        box.layer.cornerRadius = 8
+        box.layer.masksToBounds = true
+
+        let label = UILabel()
+        label.text = text
+        label.numberOfLines = 0
+        label.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
+        label.textColor = .secondaryLabel
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        box.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: box.topAnchor, constant: 10),
+            label.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 10),
+            label.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -10),
+            label.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -10)
+        ])
+        stack.addArrangedSubview(box)
+    }
 }
