@@ -9,17 +9,48 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    # 不要用 macos-latest：它已升到 macOS 26 + iOS 26 SDK。
+    # 用 iOS 26 SDK 编出来的二进制跑在 iOS 14~18 上会因 Swift/SwiftUI 符号缺失
+    # 在 dyld 阶段直接闪退（实测本工程踩过）。macos-15 默认带 Xcode 16。
+    runs-on: macos-15
     timeout-minutes: 40
 
     steps:
       - name: 取出源码
         uses: actions/checkout@v4
 
+      - name: 选择 Xcode 并校验 SDK 版本
+        run: |
+          set -e
+          echo "---- runner 上的 Xcode ----"
+          ls -d /Applications/Xcode*.app 2>/dev/null || true
+
+          # 优先挑 16.x（iOS 18 SDK），没有则退回默认
+          PICK="$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -n "$PICK" ]; then
+            echo "选用: $PICK"
+            sudo xcode-select -s "$PICK"
+          else
+            echo "未找到 Xcode_16*.app，沿用默认工具链"
+          fi
+
+          xcodebuild -version
+          SDK_VER="$(xcrun --sdk iphoneos --show-sdk-version)"
+          echo "iOS SDK: $SDK_VER"
+
+          SDK_MAJOR="${SDK_VER%%.*}"
+          if [ "$SDK_MAJOR" -gt 18 ]; then
+            echo "::error::iOS SDK $SDK_VER 过新。用高于 18 的 SDK 编出面向 iOS 14 的包，"
+            echo "::error::会在老设备上 dyld 报 Symbol not found 直接闪退。请换 macos-15 或更低镜像。"
+            exit 1
+          fi
+          echo "SDK 版本检查通过（<= 18）"
+
       - name: 显示工具链
         run: |
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
+          echo "swift-stdlib-tool: $(command -v xcrun) ok"
 
       - name: 安装 ldid（必需）
         run: |
@@ -39,17 +70,32 @@ jobs:
           set -e
           [ -f AppScanner.tipa ] || { echo "没有产出 tipa"; exit 1; }
           ls -lh AppScanner.tipa
-          echo "---- tipa 内容（前 20 项）----"
-          unzip -l AppScanner.tipa | head -20
-          echo "---- 主二进制架构 ----"
+          echo "---- tipa 内容 ----"
+          unzip -l AppScanner.tipa
+
           rm -rf /tmp/verify && mkdir -p /tmp/verify
           unzip -q AppScanner.tipa -d /tmp/verify
-          lipo -info /tmp/verify/Payload/AppScanner.app/AppScanner
+          BIN=/tmp/verify/Payload/AppScanner.app/AppScanner
+
+          echo "---- 主二进制架构 ----"
+          lipo -info "$BIN"
+
+          echo "---- 编译 SDK / 最低系统 ----"
+          otool -l "$BIN" | grep -A4 LC_BUILD_VERSION || true
+
+          echo "---- Swift 运行时是否已嵌入 ----"
+          if [ -d /tmp/verify/Payload/AppScanner.app/Frameworks ]; then
+            ls /tmp/verify/Payload/AppScanner.app/Frameworks | head -20
+          else
+            echo "::warning::没有 Frameworks 目录，依赖系统 Swift 运行时"
+          fi
+
           echo "---- 二进制内 entitlements ----"
-          ldid -e /tmp/verify/Payload/AppScanner.app/AppScanner | tee /tmp/ent.txt
+          ldid -e "$BIN" | tee /tmp/ent.txt
           grep -q "no-sandbox" /tmp/ent.txt
           grep -q "platform-application" /tmp/ent.txt
           echo "entitlements 校验通过"
+
           shasum -a 256 AppScanner.tipa | tee AppScanner.tipa.sha256
 
       - name: 上传 tipa

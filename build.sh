@@ -22,7 +22,7 @@ BINARY="$PAYLOAD/$TARGET.app/$BINARY_NAME"
 
 RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; RST=$'\033[0m'
 STEP=0
-TOTAL=7
+TOTAL=8
 step() { STEP=$((STEP + 1)); echo ""; echo "==> [$STEP/$TOTAL] $1"; }
 die()  { echo "${RED}!! $1${RST}" >&2; exit 1; }
 
@@ -39,7 +39,18 @@ command -v zip        >/dev/null 2>&1 || die "找不到 zip（macOS 自带，异
 [ -f "$ENTITLEMENTS" ] || die "找不到 entitlements 文件：$ENTITLEMENTS"
 
 echo "    Xcode: $(xcodebuild -version 2>/dev/null | head -1)"
-echo "    SDK  : $(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo unknown)"
+SDK_VER="$(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo unknown)"
+echo "    SDK  : $SDK_VER"
+
+# iOS 26 SDK（Xcode 26）编出来的二进制跑在 iOS 14~18 上会在 dyld 阶段
+# 报 Symbol not found 直接闪退，这是实测踩过的坑，必须挡在前面。
+if [ "$SDK_VER" != "unknown" ]; then
+  SDK_MAJOR="${SDK_VER%%.*}"
+  if [ "$SDK_MAJOR" -gt 18 ]; then
+    die "iOS SDK $SDK_VER 过新（>18）。用新 SDK 编面向 iOS 14 的包，装到老系统必然闪退。
+    换 Xcode 16.x：  sudo xcode-select -s /Applications/Xcode_16.4.app"
+  fi
+fi
 
 HAVE_LDID=0
 if command -v ldid >/dev/null 2>&1; then
@@ -69,6 +80,8 @@ xcodebuild \
   -configuration Release \
   ARCHS=arm64 \
   ONLY_ACTIVE_ARCH=NO \
+  ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES=NO \
+  SWIFT_OPTIMIZATION_LEVEL="-O" \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY="" \
@@ -79,6 +92,42 @@ APP="$BUILD_DIR/$TARGET.app"
 [ -d "$APP" ] || die "编译产物不存在：$APP"
 [ -f "$APP/$BINARY_NAME" ] || die "可执行文件不存在：$APP/$BINARY_NAME"
 echo "    产物: $APP"
+
+# ---------------------------------------------------------------- 依赖体检
+step "检查二进制依赖"
+echo "    ---- 编译 SDK / 最低系统 ----"
+otool -l "$APP/$BINARY_NAME" 2>/dev/null | grep -A5 "LC_BUILD_VERSION" | head -8 || true
+
+echo "    ---- 动态库依赖 ----"
+DEPS="$(otool -L "$APP/$BINARY_NAME" 2>/dev/null | tail -n +2 | awk '{print $1}')"
+printf '%s\n' "$DEPS" | sed 's/^/      /'
+
+# @rpath / @executable_path 形式的依赖必须能在包里找到，否则设备上 dyld 直接拒载
+MISSING=""
+while IFS= read -r dep; do
+  [ -n "$dep" ] || continue
+  case "$dep" in
+    @rpath/*)
+      base="${dep#@rpath/}"
+      [ -f "$APP/Frameworks/$base" ] || MISSING="$MISSING $dep"
+      ;;
+    @executable_path/*)
+      base="${dep#@executable_path/}"
+      [ -f "$APP/$base" ] || MISSING="$MISSING $dep"
+      ;;
+  esac
+done <<< "$DEPS"
+
+if [ -n "$MISSING" ]; then
+  echo "    ${YEL}警告：以下依赖在包内找不到：$MISSING${RST}"
+fi
+
+SWIFT_LIBS="$(ls "$APP/Frameworks" 2>/dev/null | wc -l | tr -d ' ')"
+if [ "$SWIFT_LIBS" -gt 0 ]; then
+  echo "    Frameworks 内嵌库：$SWIFT_LIBS 个"
+else
+  echo "    依赖系统 Swift 运行时（iOS 12.2+ 自带，正常）"
+fi
 
 # ---------------------------------------------------------------- 组装
 step "组装 Payload/"
@@ -114,16 +163,23 @@ if [ "$SIGNED" -eq 0 ]; then
 fi
 
 # 嵌套二进制（Frameworks / PlugIns）也要签一遍。
-# 现在没有依赖所以是空操作，但以后加了 framework 或 appex 忘了签，
-# 装到设备上就是 dyld 加载失败，很难查。
+# 嵌入的 Swift 运行时 dylib 若没签名，装到设备上 dyld 会拒绝加载 —— 一样是闪退。
 if [ "$HAVE_LDID" -eq 1 ]; then
   NESTED=0
+  NESTED_FAIL=0
   while IFS= read -r -d '' nested; do
-    if ldid -S"$ENTITLEMENTS" "$nested" 2>/dev/null; then
-      NESTED=$((NESTED + 1))
-    fi
+    case "$nested" in
+      *.dylib|*/Frameworks/*)
+        # dylib 用 ad-hoc 签名即可，不需要那份越权 entitlements
+        if ldid -S "$nested" 2>/dev/null; then NESTED=$((NESTED + 1)); else NESTED_FAIL=$((NESTED_FAIL + 1)); fi
+        ;;
+      *)
+        if ldid -S"$ENTITLEMENTS" "$nested" 2>/dev/null; then NESTED=$((NESTED + 1)); else NESTED_FAIL=$((NESTED_FAIL + 1)); fi
+        ;;
+    esac
   done < <(find "$PAYLOAD/$TARGET.app/Frameworks" "$PAYLOAD/$TARGET.app/PlugIns" -type f -print0 2>/dev/null)
-  echo "    嵌套二进制已签名：$NESTED 个"
+  echo "    嵌套二进制已签名：$NESTED 个，失败 $NESTED_FAIL 个"
+  [ "$NESTED_FAIL" -eq 0 ] || die "有 $NESTED_FAIL 个嵌套二进制签名失败，装上去会加载不了。"
 fi
 
 # 自检：entitlements 必须真的写进了二进制
