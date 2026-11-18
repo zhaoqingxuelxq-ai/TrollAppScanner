@@ -1,0 +1,11 @@
+# 统一换行符：Windows 上不加这一条，build.sh 会被转成 CRLF，
+# 推到 GitHub Actions 上 bash 直接报 "bad interpreter: /usr/bin/env: bash^M"
+* text=auto eol=lf
+
+*.sh    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+
+*.png   binary
+*.icns  binary
+*.tipa  binary

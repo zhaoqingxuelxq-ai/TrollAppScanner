@@ -1,0 +1,22 @@
+# 构建产物
+build/
+Payload/
+*.tipa
+*.ipa
+*.xcarchive
+*.dSYM/
+
+# macOS
+.DS_Store
+._*
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+DerivedData/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp

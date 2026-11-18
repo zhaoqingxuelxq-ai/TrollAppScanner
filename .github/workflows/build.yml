@@ -1,0 +1,67 @@
+name: Build TrollAppScanner tipa
+
+on:
+  push:
+    branches: [ main, master ]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+concurrency:
+  group: tipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 40
+
+    steps:
+      - name: 取出源码
+        uses: actions/checkout@v4
+
+      - name: 显示工具链
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: 安装 ldid（必需）
+        run: |
+          brew install ldid
+          ldid --version || true
+          command -v ldid
+
+      - name: 编译并打包
+        run: |
+          # Git for Windows 可能把换行写成 CRLF，这里兜底去掉
+          sed -i '' 's/\r$//' build.sh 2>/dev/null || sed -i 's/\r$//' build.sh
+          chmod +x build.sh
+          ./build.sh
+
+      - name: 校验产物
+        run: |
+          set -e
+          [ -f AppScanner.tipa ] || { echo "没有产出 tipa"; exit 1; }
+          ls -lh AppScanner.tipa
+          echo "---- tipa 内容（前 20 项）----"
+          unzip -l AppScanner.tipa | head -20
+          echo "---- 主二进制架构 ----"
+          rm -rf /tmp/verify && mkdir -p /tmp/verify
+          unzip -q AppScanner.tipa -d /tmp/verify
+          lipo -info /tmp/verify/Payload/AppScanner.app/AppScanner
+          echo "---- 二进制内 entitlements ----"
+          ldid -e /tmp/verify/Payload/AppScanner.app/AppScanner | tee /tmp/ent.txt
+          grep -q "no-sandbox" /tmp/ent.txt
+          grep -q "platform-application" /tmp/ent.txt
+          echo "entitlements 校验通过"
+          shasum -a 256 AppScanner.tipa | tee AppScanner.tipa.sha256
+
+      - name: 上传 tipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrollAppScanner-tipa
+          path: |
+            AppScanner.tipa
+            AppScanner.tipa.sha256
+          if-no-files-found: error
+          retention-days: 30
