@@ -1,0 +1,22 @@
+name: Probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: linux ok
+        run: |
+          echo "LINUX_RUNNER_OK"
+          uname -a
+
+  probe-mac:
+    runs-on: macos-14
+    steps:
+      - name: mac ok
+        run: |
+          echo "MAC_RUNNER_OK"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
