@@ -201,6 +201,57 @@ func printableValue(_ value: Any?) -> String {
     return String(describing: value)
 }
 
+// MARK: - 启动日志
+//
+// App 在设备上一启动就闪退时，界面上什么都看不到。
+// 这里把关键节点落到文件，能反推是「没进 Swift 代码」还是「死在扫描里」：
+//   Documents/boot.log —— 用「文件」App 就能取（Info.plist 已开 UIFileSharingEnabled）
+//   /tmp/boot.log      —— no-sandbox 生效时可直接读
+enum Boot {
+    static let docPath: String = {
+        let home = NSHomeDirectory()
+        return home + "/Documents/boot.log"
+    }()
+
+    static func log(_ message: String) {
+        let stamp = String(format: "%.3f", Date().timeIntervalSince1970)
+        let line = stamp + " " + message + "\n"
+        guard let data = line.data(using: .utf8) else { return }
+
+        append(data, to: docPath)
+        append(data, to: "/tmp/boot.log")
+    }
+
+    private static func append(_ data: Data, to path: String) {
+        let fm = FileManager.default
+        let dir = (path as NSString).deletingLastPathComponent
+        if !fm.fileExists(atPath: dir) {
+            try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        }
+        if let handle = FileHandle(forWritingAtPath: path) {
+            handle.seekToEndOfFile()
+            handle.write(data)
+            handle.closeFile()
+        } else {
+            try? data.write(to: URL(fileURLWithPath: path))
+        }
+    }
+
+    /// 覆盖写「当前正在处理的对象」。
+    /// 扫描中途崩掉时，这个文件里的内容就是最后一个经手的安装包，
+    /// 能直接定位到是哪个 App 触发的崩溃。
+    static func mark(_ text: String) {
+        guard let data = text.data(using: .utf8) else { return }
+        let doc = NSHomeDirectory() + "/Documents/current.txt"
+        let dir = (doc as NSString).deletingLastPathComponent
+        if !FileManager.default.fileExists(atPath: dir) {
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        }
+        try? data.write(to: URL(fileURLWithPath: doc))
+        try? data.write(to: URL(fileURLWithPath: "/tmp/current.txt"))
+    }
+}
+
 // MARK: - 图标缓存（带降采样）
 
 final class IconCache {

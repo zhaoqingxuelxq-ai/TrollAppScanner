@@ -10,6 +10,12 @@ import UIKit
 
 @main
 struct TrollAppScannerApp: App {
+    init() {
+        Boot.log("1) App.init 进入（dyld 已通过，Swift 代码在跑）")
+        Boot.log("   bundle=\(Bundle.main.bundlePath)")
+        Boot.log("   system=\(UIDevice.current.systemVersion) model=\(UIDevice.current.model)")
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -33,6 +39,7 @@ final class ScannerModel: ObservableObject {
         hasScanned = false
         progress = 0
         status = "开始扫描…"
+        Boot.log("3) 扫描开始")
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
@@ -42,9 +49,12 @@ final class ScannerModel: ObservableObject {
                 self.progress = value
                 self.status = text
             }
+            Boot.log("4) 扫描结束，共 \(result.count) 个包")
             DispatchQueue.main.async {
                 self.apps = result
+                Boot.log("5) 环境探测开始")
                 self.environment = EnvironmentProbe.probe()
+                Boot.log("6) 环境探测完成，界面更新")
                 self.isScanning = false
                 self.hasScanned = true
             }
@@ -148,9 +158,10 @@ struct ContentView: View {
                 DiagnosticsView()
             }
             .onAppear {
-                if !model.hasScanned && !model.isScanning {
-                    model.start()
-                }
+                Boot.log("2) ContentView.onAppear（界面构建完成，没有崩）")
+                // 不在启动时自动全盘扫描。
+                // 一进 App 就解析几百个安装包的 Mach-O 和签名，一旦某个文件畸形就整进程崩溃，
+                // 表现为白屏闪退。改成用户主动点按钮，既能定位问题，也不会一打开就卡。
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
@@ -350,11 +361,13 @@ struct ContentView: View {
             Image(systemName: model.isScanning ? "hourglass" : "shippingbox")
                 .font(.system(size: 52, weight: .thin))
                 .foregroundColor(Color(UIColor.tertiaryLabel))
-            Text(model.isScanning ? "正在扫描…" : "暂无数据")
+            Text(model.isScanning ? "正在扫描…" : "尚未扫描")
                 .font(.system(size: 15, weight: .medium))
                 .foregroundColor(.secondary)
             if !model.isScanning {
-                Text("如果列表为空，多半是 entitlements 没生效：\n本 tipa 必须通过 TrollStore 安装。")
+                Text(model.hasScanned
+                     ? "没有找到安装包。点左上角听诊器看环境诊断，\n确认 no-sandbox 与 platform-application 是否生效。"
+                     : "点下面按钮开始扫描整机安装包。\n扫描需要读取全盘文件，只在点按钮时执行。")
                     .font(.system(size: 12))
                     .foregroundColor(Color(UIColor.tertiaryLabel))
                     .multilineTextAlignment(.center)
@@ -362,7 +375,7 @@ struct ContentView: View {
                 Button {
                     model.start()
                 } label: {
-                    Text("重新扫描")
+                    Text(model.hasScanned ? "重新扫描" : "开始扫描")
                         .font(.system(size: 14, weight: .semibold))
                         .padding(.horizontal, 22)
                         .padding(.vertical, 10)

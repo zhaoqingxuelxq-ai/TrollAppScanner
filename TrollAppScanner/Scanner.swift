@@ -419,10 +419,13 @@ enum AppScannerEngine {
             DispatchQueue.main.async { update(progress, text) }
         }
 
+        Boot.log("scan 0) 开始定位安装包目录")
         post(0.02, "正在定位安装包目录…")
         let candidates = bundleCandidates(options: options)
+        Boot.log("scan 1) 候选包 \(candidates.count) 个")
         post(0.05, "发现 \(candidates.count) 个候选包，正在读取容器映射…")
         let containerMap = buildContainerMap()
+        Boot.log("scan 2) 容器映射 \(containerMap.count) 条")
 
         var records: [AppRecord] = []
         let total = max(candidates.count, 1)
@@ -430,14 +433,22 @@ enum AppScannerEngine {
         for (index, item) in candidates.enumerated() {
             let percentage = 0.08 + 0.88 * (Double(index) / Double(total))
             let shortName = (item.path as NSString).lastPathComponent
+            // 覆盖写当前位置：万一中途崩了，这个文件就是死亡现场
+            Boot.mark("\(index + 1)/\(total) \(item.path)")
             post(percentage, "扫描 \(shortName)  [\(index + 1)/\(total)]")
-            if let record = parseApp(bundlePath: item.path,
-                                     kind: item.kind,
-                                     containerMap: containerMap,
-                                     options: options) {
-                records.append(record)
+            // 每个包单独一个 autoreleasepool：几百个包连续解析的临时对象
+            // 不释放会顶到 jetsam 上限被系统杀进程，表现同样是闪退
+            autoreleasepool {
+                if let record = parseApp(bundlePath: item.path,
+                                         kind: item.kind,
+                                         containerMap: containerMap,
+                                         options: options) {
+                    records.append(record)
+                }
             }
         }
+        Boot.mark("DONE 共 \(records.count) 个")
+        Boot.log("scan 3) 循环结束，\(records.count) 条")
 
         post(0.97, "整理与去重…")
         var counts: [String: Int] = [:]
