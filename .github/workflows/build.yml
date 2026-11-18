@@ -7,10 +7,6 @@ on:
       - '**.md'
   workflow_dispatch:
 
-concurrency:
-  group: tipa-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   build:
     runs-on: macos-14
