@@ -64,6 +64,12 @@ struct MachOResult {
     var dylibs: [String] = []
     var codeSigOffset: Int = 0
     var codeSigSize: Int = 0
+
+    var uuid: String = ""
+    var platformLabel: String = ""
+    var minOSVersion: String = ""
+    var sdkVersion: String = ""
+    var rpaths: [String] = []
 }
 
 enum MachO {
@@ -122,6 +128,11 @@ enum MachO {
                     result.dylibs = single.dylibs
                     result.codeSigOffset = single.codeSigOffset
                     result.codeSigSize = single.codeSigSize
+                    result.uuid = single.uuid
+                    result.platformLabel = single.platformLabel
+                    result.minOSVersion = single.minOSVersion
+                    result.sdkVersion = single.sdkVersion
+                    result.rpaths = single.rpaths
                     break
                 }
             }
@@ -132,6 +143,11 @@ enum MachO {
             result.dylibs = single.dylibs
             result.codeSigOffset = single.codeSigOffset
             result.codeSigSize = single.codeSigSize
+            result.uuid = single.uuid
+            result.platformLabel = single.platformLabel
+            result.minOSVersion = single.minOSVersion
+            result.sdkVersion = single.sdkVersion
+            result.rpaths = single.rpaths
             result.architectures = [cpuName(be32(header, 4), be32(header, 8))]
         } else {
             return nil
@@ -181,12 +197,74 @@ enum MachO {
                     result.codeSigOffset = base + Int(be32(body, cursor + 8))
                     result.codeSigSize = Int(be32(body, cursor + 12))
                 }
+            case 0x1B:   // LC_UUID
+                if cursor + 24 <= body.count {
+                    result.uuid = uuidText(body, cursor + 8)
+                }
+            case 0x32:   // LC_BUILD_VERSION（Xcode 10+ 产出）
+                if cursor + 24 <= body.count {
+                    result.platformLabel = platformName(be32(body, cursor + 8))
+                    result.minOSVersion = versionText(be32(body, cursor + 12))
+                    result.sdkVersion = versionText(be32(body, cursor + 16))
+                }
+            case 0x25:   // LC_VERSION_MIN_IPHONEOS（老工具链）
+                if cursor + 16 <= body.count {
+                    result.platformLabel = "iOS"
+                    result.minOSVersion = versionText(be32(body, cursor + 8))
+                    result.sdkVersion = versionText(be32(body, cursor + 12))
+                }
+            case 0x8000001C:   // LC_RPATH
+                if cursor + 12 <= body.count {
+                    let pathOffset = Int(be32(body, cursor + 8))
+                    if pathOffset > 0, cursor + pathOffset < body.count {
+                        let path = cString(body, cursor + pathOffset)
+                        if !path.isEmpty { result.rpaths.append(path) }
+                    }
+                }
             default:
                 break
             }
             cursor += cmdsize
         }
         return result
+    }
+
+    /// LC_UUID 的 16 字节转标准 8-4-4-4-12 形式
+    static func uuidText(_ data: Data, _ offset: Int) -> String {
+        let start = data.startIndex
+        guard offset + 16 <= data.count else { return "" }
+        var bytes: [UInt8] = []
+        for i in 0..<16 { bytes.append(data[start + offset + i]) }
+        let groups: [ArraySlice<UInt8>] = [
+            bytes[0..<4], bytes[4..<6], bytes[6..<8], bytes[8..<10], bytes[10..<16]
+        ]
+        return groups.map { group in
+            group.map { String(format: "%02X", $0) }.joined()
+        }.joined(separator: "-")
+    }
+
+    /// Mach-O 里的版本号是 nibble 编码：0x000D0200 → 13.2
+    static func versionText(_ raw: UInt32) -> String {
+        let major = raw >> 16
+        let minor = (raw >> 8) & 0xFF
+        let patch = raw & 0xFF
+        if patch != 0 { return "\(major).\(minor).\(patch)" }
+        return "\(major).\(minor)"
+    }
+
+    static func platformName(_ raw: UInt32) -> String {
+        switch raw {
+        case 1: return "macOS"
+        case 2: return "iOS"
+        case 3: return "tvOS"
+        case 4: return "watchOS"
+        case 5: return "bridgeOS"
+        case 6: return "Mac Catalyst"
+        case 7: return "iOS 模拟器"
+        case 8: return "tvOS 模拟器"
+        case 9: return "watchOS 模拟器"
+        default: return "platform_\(raw)"
+        }
     }
 
     static func cpuName(_ cpu: UInt32, _ sub: UInt32) -> String {
@@ -274,6 +352,47 @@ enum CodeSign {
             }
         }
 
+        return info
+    }
+}
+
+// MARK: - 描述文件（embedded.mobileprovision）解析
+
+enum Provision {
+
+    /// mobileprovision 是 CMS 签名包裹，正文里嵌了一段 XML plist，直接截出来解析。
+    /// 不去验签（也没必要），只取「谁签的、给了什么权限、什么时候过期」。
+    static func parse(bundlePath: String) -> ProvisionInfo? {
+        let path = bundlePath + "/embedded.mobileprovision"
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: path), let raw = fm.contents(atPath: path) else { return nil }
+
+        guard let startRange = raw.range(of: Data("<?xml".utf8)),
+              let endRange = raw.range(of: Data("</plist>".utf8)),
+              startRange.lowerBound < endRange.upperBound else { return nil }
+
+        let plistData = raw.subdata(in: startRange.lowerBound..<endRange.upperBound)
+        guard let object = try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil),
+              let dict = object as? [String: Any] else { return nil }
+
+        var info = ProvisionInfo()
+        info.exists = true
+        info.name = dict["Name"] as? String ?? ""
+        info.appIDName = dict["AppIDName"] as? String ?? ""
+        info.teamName = dict["TeamName"] as? String ?? ""
+        if let teams = dict["TeamIdentifier"] as? [String], let first = teams.first {
+            info.teamID = first
+        }
+        info.uuid = dict["UUID"] as? String ?? ""
+        info.creationDate = dict["CreationDate"] as? Date
+        info.expirationDate = dict["ExpirationDate"] as? Date
+        info.provisionsAllDevices = (dict["ProvisionsAllDevices"] as? Bool) ?? false
+        info.provisionedDeviceCount = (dict["ProvisionedDevices"] as? [Any])?.count ?? 0
+        info.platforms = (dict["Platform"] as? [String]) ?? []
+
+        if let entitlements = dict["Entitlements"] as? [String: Any] {
+            info.applicationIdentifier = entitlements["application-identifier"] as? String ?? ""
+        }
         return info
     }
 }
@@ -521,6 +640,9 @@ enum AppScannerEngine {
             if let macho = MachO.parse(path: executablePath) {
                 record.architectures = macho.architectures
                 record.encrypted = macho.encrypted
+                record.binaryUUID = macho.uuid
+                record.buildSDK = macho.sdkVersion
+                record.binaryMinOS = macho.minOSVersion
                 if macho.codeSigSize > 0, options.readEntitlements,
                    let signature = CodeSign.parse(path: executablePath,
                                                   offset: macho.codeSigOffset,
@@ -532,6 +654,11 @@ enum AppScannerEngine {
                         record.injectedLibs.append(library)
                     } else if isExternalLibrary(library) {
                         record.externalLibs.append(library)
+                    }
+                    // 声明了依赖但文件不在 → 这个 App 一启动就会 dyld 崩
+                    if library.hasPrefix("@"),
+                       isLibraryMissing(library, rpaths: macho.rpaths, bundlePath: bundlePath) {
+                        record.missingLibs.append(library)
                     }
                 }
             }
@@ -585,6 +712,16 @@ enum AppScannerEngine {
                     item.name = !extDisplay.isEmpty ? extDisplay : (!extName.isEmpty ? extName : ((extensionPath as NSString).lastPathComponent))
                 }
                 if !item.bundleID.isEmpty { record.extensions.append(item) }
+            }
+        }
+
+        // 描述文件（有 embedded.mobileprovision 才解析，App Store 包没有）
+        if let provision = Provision.parse(bundlePath: bundlePath) {
+            record.provision = provision
+            if provision.isExpired {
+                record.notes.append("描述文件已于 \(humanDate(provision.expirationDate)) 过期，当前渠道无法重新安装")
+            } else if let days = provision.daysRemaining, days >= 0, days <= 14 {
+                record.notes.append("描述文件 \(days) 天后过期")
             }
         }
 
@@ -699,6 +836,54 @@ enum AppScannerEngine {
         return false
     }
 
+    /// 展开 @rpath / @executable_path / @loader_path，返回实际存在的绝对路径
+    static func resolveLibrary(_ library: String,
+                               rpaths: [String],
+                               bundlePath: String) -> String? {
+        func expand(_ path: String) -> String {
+            path
+                .replacingOccurrences(of: "@executable_path", with: bundlePath)
+                .replacingOccurrences(of: "@loader_path", with: bundlePath)
+        }
+
+        if library.hasPrefix("@rpath/") {
+            let rest = String(library.dropFirst("@rpath/".count))
+            for rpath in rpaths {
+                let candidate = expand(rpath) + "/" + rest
+                if fm.fileExists(atPath: candidate) { return candidate }
+            }
+            return nil
+        }
+        if library.hasPrefix("@") {
+            let expanded = expand(library)
+            return fm.fileExists(atPath: expanded) ? expanded : nil
+        }
+        return fm.fileExists(atPath: library) ? library : nil
+    }
+
+    /// 判断一个 @ 开头的依赖是不是真的缺文件。
+    /// 系统 Swift 运行时不在 App 包里，必须排除，否则满屏误报。
+    static func isLibraryMissing(_ library: String,
+                                 rpaths: [String],
+                                 bundlePath: String) -> Bool {
+        if resolveLibrary(library, rpaths: rpaths, bundlePath: bundlePath) != nil { return false }
+
+        let name = (library as NSString).lastPathComponent
+        if name.isEmpty { return false }
+        if name.hasPrefix("libswift") || name.hasPrefix("libSystem") || name.hasPrefix("libc++") {
+            return false
+        }
+        let systemCandidates = [
+            "/usr/lib/swift/" + name,
+            "/usr/lib/" + name,
+            "/System/Library/Frameworks/" + name
+        ]
+        for candidate in systemCandidates where fm.fileExists(atPath: candidate) {
+            return false
+        }
+        return true
+    }
+
     static func isExternalLibrary(_ path: String) -> Bool {
         if path.hasPrefix("@") { return false }
         if path.hasPrefix("/usr/lib/") { return false }
@@ -709,6 +894,10 @@ enum AppScannerEngine {
 
     static func originLabel(kind: AppKind, record: AppRecord, bundlePath: String) -> String {
         if kind == .system || bundlePath.hasPrefix("/System/") { return "苹果系统" }
+        if record.provision.exists {
+            if record.provision.provisionsAllDevices { return "企业签（In-House）" }
+            if record.provision.provisionedDeviceCount > 0 { return "描述文件（Ad Hoc / 开发）" }
+        }
         if fm.fileExists(atPath: bundlePath + "/SC_Info") { return "App Store" }
         if fm.fileExists(atPath: bundlePath + "/embedded.mobileprovision") {
             return record.sign.isAdhoc ? "企业签名 · 侧载" : "企业 / 开发签名"

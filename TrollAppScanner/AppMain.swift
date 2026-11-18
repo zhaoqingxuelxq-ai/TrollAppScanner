@@ -61,6 +61,7 @@ enum FilterMode: String, CaseIterable, Identifiable {
     case injected = "注入"
     case sideloaded = "侧载"
     case duplicate = "重复"
+    case expired = "过期"
 
     var id: String { rawValue }
 }
@@ -173,6 +174,8 @@ struct ContentView: View {
             list = list.filter { $0.origin.contains("TrollStore") || $0.origin.contains("签名") }
         case .duplicate:
             list = list.filter { $0.isDuplicate }
+        case .expired:
+            list = list.filter { $0.provision.exists && $0.provision.isExpired }
         }
 
         let keyword = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -209,6 +212,7 @@ struct ContentView: View {
         case .injected: return model.apps.filter { !$0.injectedLibs.isEmpty }.count
         case .sideloaded: return model.apps.filter { $0.origin.contains("TrollStore") || $0.origin.contains("签名") }.count
         case .duplicate: return model.apps.filter { $0.isDuplicate }.count
+        case .expired: return model.apps.filter { $0.provision.exists && $0.provision.isExpired }.count
         }
     }
 
@@ -425,8 +429,14 @@ struct AppRow: View {
                     if !app.injectedLibs.isEmpty {
                         TagView(text: "注入", color: .red)
                     }
+                    if !app.missingLibs.isEmpty {
+                        TagView(text: "缺依赖", color: .red)
+                    }
                     if app.encrypted {
                         TagView(text: "加密", color: .blue)
+                    }
+                    if app.provision.exists && app.provision.isExpired {
+                        TagView(text: "已过期", color: .gray)
                     }
                 }
 

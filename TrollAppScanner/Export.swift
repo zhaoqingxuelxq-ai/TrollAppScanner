@@ -73,7 +73,11 @@ enum Exporter {
                 "externalLibs": record.externalLibs,
                 "privacyKeys": record.privacyKeys,
                 "isDuplicate": record.isDuplicate,
-                "notes": record.notes
+                "notes": record.notes,
+                "uuid": record.binaryUUID,
+                "buildSDK": record.buildSDK,
+                "binaryMinOS": record.binaryMinOS,
+                "missingLibs": record.missingLibs
             ]
 
             if let container = record.containerPath {
@@ -106,6 +110,28 @@ enum Exporter {
             }
             dict["extensions"] = extensions
 
+            if record.provision.exists {
+                var provision: [String: Any] = [
+                    "name": record.provision.name,
+                    "teamName": record.provision.teamName,
+                    "teamID": record.provision.teamID,
+                    "kind": record.provision.kindText,
+                    "applicationIdentifier": record.provision.applicationIdentifier,
+                    "provisionedDevices": record.provision.provisionedDeviceCount,
+                    "provisionsAllDevices": record.provision.provisionsAllDevices,
+                    "expired": record.provision.isExpired
+                ]
+                let formatter = DateFormatter()
+                formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+                if let date = record.provision.creationDate {
+                    provision["creationDate"] = formatter.string(from: date)
+                }
+                if let date = record.provision.expirationDate {
+                    provision["expirationDate"] = formatter.string(from: date)
+                }
+                dict["provision"] = provision
+            }
+
             array.append(dict)
         }
 
@@ -118,7 +144,8 @@ enum Exporter {
         let header = [
             "名称", "BundleID", "版本", "Build", "类型", "来源",
             "体积(字节)", "体积", "架构", "加密", "签名类型", "TeamID",
-            "安装路径", "数据容器", "注入库", "扩展数", "安装时间"
+            "安装路径", "数据容器", "注入库", "扩展数", "安装时间",
+            "UUID", "编译SDK", "描述文件Team", "描述文件类型", "过期时间", "缺依赖数"
         ]
 
         var lines: [String] = []
@@ -146,7 +173,13 @@ enum Exporter {
                 app.containerPath ?? "",
                 app.injectedLibs.joined(separator: "|"),
                 "\(app.extensions.count)",
-                humanDate(app.installDate)
+                humanDate(app.installDate),
+                app.binaryUUID,
+                app.buildSDK,
+                app.provision.teamName,
+                app.provision.exists ? app.provision.kindText : "",
+                app.provision.exists ? humanDate(app.provision.expirationDate) : "",
+                "\(app.missingLibs.count)"
             ]
             lines.append(row.map { escape($0) }.joined(separator: ","))
         }
@@ -173,6 +206,8 @@ enum Exporter {
         let injected = apps.filter { !$0.injectedLibs.isEmpty }
         let duplicates = apps.filter { $0.isDuplicate }
         let encrypted = apps.filter { $0.encrypted }
+        let expired = apps.filter { $0.provision.exists && $0.provision.isExpired }
+        let broken = apps.filter { !$0.missingLibs.isEmpty }
 
         lines.append("==============================================")
         lines.append("        TrollAppScanner  安装包清单报告")
@@ -183,6 +218,8 @@ enum Exporter {
         lines.append("含注入库 : \(injected.count)")
         lines.append("加密包体 : \(encrypted.count)")
         lines.append("重复副本 : \(duplicates.count)")
+        lines.append("描述过期 : \(expired.count)")
+        lines.append("缺失依赖 : \(broken.count)")
         lines.append("")
 
         let groups: [(name: String, list: [AppRecord])] = [
@@ -215,6 +252,16 @@ enum Exporter {
                     for lib in app.injectedLibs {
                         lines.append("        - \(lib)")
                     }
+                }
+                if app.provision.exists {
+                    lines.append("    描述文件  : \(app.provision.kindText) / Team: \(app.provision.teamName.isEmpty ? "-" : app.provision.teamName)")
+                    if app.provision.expirationDate != nil {
+                        let suffix = app.provision.isExpired ? "（已过期）" : ""
+                        lines.append("    有效期至  : \(humanDate(app.provision.expirationDate))\(suffix)")
+                    }
+                }
+                if !app.missingLibs.isEmpty {
+                    lines.append("    缺依赖    : \(app.missingLibs.count) 个，启动会闪退")
                 }
                 lines.append("    安装路径  : \(app.bundlePath)")
                 if let container = app.containerPath {

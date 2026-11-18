@@ -54,6 +54,40 @@ struct CodeSignInfo {
     }
 }
 
+// MARK: - 描述文件（embedded.mobileprovision）信息
+
+struct ProvisionInfo {
+    var exists: Bool = false
+    var name: String = ""
+    var appIDName: String = ""
+    var teamName: String = ""
+    var teamID: String = ""
+    var uuid: String = ""
+    var applicationIdentifier: String = ""
+    var creationDate: Date? = nil
+    var expirationDate: Date? = nil
+    var provisionedDeviceCount: Int = 0
+    var provisionsAllDevices: Bool = false
+    var platforms: [String] = []
+
+    var isExpired: Bool {
+        guard let expiration = expirationDate else { return false }
+        return expiration < Date()
+    }
+
+    /// 剩余天数，已过期则为负数
+    var daysRemaining: Int? {
+        guard let expiration = expirationDate else { return nil }
+        return Calendar.current.dateComponents([.day], from: Date(), to: expiration).day
+    }
+
+    var kindText: String {
+        if provisionsAllDevices { return "企业签（In-House）" }
+        if provisionedDeviceCount > 0 { return "描述文件（Ad Hoc / 开发）" }
+        return "App Store（无设备限制）"
+    }
+}
+
 // MARK: - 单个安装包记录
 
 struct AppRecord: Identifiable {
@@ -74,8 +108,18 @@ struct AppRecord: Identifiable {
     var architectures: [String] = []
     var encrypted: Bool = false
     var sign: CodeSignInfo = CodeSignInfo()
+    var provision: ProvisionInfo = ProvisionInfo()
+
+    // 直接读 Mach-O 得到的信息，比 Info.plist 里的字段可靠（后者可以被改）
+    var binaryUUID: String = ""
+    var buildSDK: String = ""
+    var binaryMinOS: String = ""
+
     var injectedLibs: [String] = []
     var externalLibs: [String] = []
+    /// 链接了但实际找不到文件的库（@rpath 解析失败）——这类 App 启动会直接闪退
+    var missingLibs: [String] = []
+
     var urlSchemes: [String] = []
     var appGroups: [String] = []
     var extensions: [AppExtension] = []

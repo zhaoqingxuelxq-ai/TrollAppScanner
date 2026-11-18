@@ -22,6 +22,9 @@
 | 签名 | 自己解析 `LC_CODE_SIGNATURE → SuperBlob → CodeDirectory`，拿 identifier、TeamID、是否 ad-hoc、platform 标记、签名摘要 |
 | Entitlements | 解析 `CSMAGIC_ENTITLEMENTS` blob，完整列出。敏感项（`platform-application`、`no-sandbox`、`get-task-allow`、`dynamic-codesigning`…）橙色高亮 |
 | 注入检测 | 遍历 `LC_LOAD_DYLIB`，命中 `TweakInject` / `MobileSubstrate` / `libhooker` / `ellekit` / `/var/jb/` / `.jbroot` / Frida / Cycript 等标记的直接标红 |
+| 描述文件 | 解析 `embedded.mobileprovision`：Team 名称 / TeamID、企业签还是 Ad Hoc、登记设备数、**过期时间与剩余天数** |
+| 二进制元数据 | `LC_UUID`、`LC_BUILD_VERSION` 里的真实最低版本与编译 SDK（比 Info.plist 里可篡改的字段靠谱） |
+| 缺失依赖 | 展开 `@rpath` / `@executable_path` / `@loader_path`，列出「链接了但文件不存在」的库 —— 这类 App 一启动就闪退 |
 | 外部依赖 | 绝对路径、且不在 `/usr/lib`、`/System` 下的 dylib 单独列出（通常意味着被改过） |
 | App 扩展 | 扫描 `PlugIns/*.appex` |
 | URL Schemes | `CFBundleURLTypes` |
@@ -182,6 +185,29 @@ TrollAppScanner/
 
 **Q：能卸载 App 吗？**
 本工具只做扫描和导出，不碰任何写入。想卸载请用 TrollStore 本身。
+
+**Q：企业签的 App 打开就闪退，用这个能看出原因吗？**
+两个最常见原因都能看到：一是列表里出现「已过期」标签、详情页「有效期至」标红 —— 证书废了；二是标签「缺依赖」，详情页会列出具体是哪个 dylib 找不到文件 —— 通常是 TrollStore 卸载 tweak 后残留的注入引用。两种情况分开处理。
+
+**Q：`签名摘要` 是什么？**
+CodeDirectory 的 SHA-256 前 24 位。同一份二进制重新 ldid 签名后这个值会变，可以用来判断「这个包是不是被人重签过」。
+
+---
+
+## 八、更新记录
+
+**1.1.0**
+- 新增描述文件解析（Team、企业签/Ad Hoc、设备数、过期时间），列表增加「已过期」筛选
+- 新增 `LC_UUID` / 编译 SDK / 二进制真实最低版本
+- 新增缺失依赖检测（@rpath 展开）
+- 注入检测覆盖 App 扩展与 Frameworks 内部（原来只看主二进制）
+- 修复：注入库匹配用宽泛子串（`applist`、`flex`）导致正常 App 误标红
+- 修复：`AppDetailView` 的 List 超过 10 个顶层视图，ViewBuilder 编译报错
+- 修复：进度回调重复派发导致状态文字滞后
+- 构建：`build.sh` 增加三道自检，ldid 缺失直接失败而不是静默降级
+
+**1.0.0**
+- 首发
 
 ---
 

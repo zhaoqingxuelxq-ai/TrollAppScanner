@@ -21,6 +21,7 @@ struct AppDetailView: View {
         List {
             headerSection
             basicSection
+            provisionSection
             pathSection
             binarySection
 
@@ -95,6 +96,47 @@ struct AppDetailView: View {
         }
     }
 
+    // MARK: - 描述文件
+
+    @ViewBuilder
+    private var provisionSection: some View {
+        if app.provision.exists {
+            Section(header: Text("描述文件 / 签名来源")) {
+                KeyValueRow(key: "类型", value: app.provision.kindText,
+                            highlight: app.provision.isExpired)
+                if !app.provision.teamName.isEmpty {
+                    KeyValueRow(key: "Team 名称", value: app.provision.teamName)
+                }
+                if !app.provision.teamID.isEmpty {
+                    KeyValueRow(key: "Team ID", value: app.provision.teamID, mono: true)
+                }
+                if !app.provision.applicationIdentifier.isEmpty {
+                    KeyValueRow(key: "App ID", value: app.provision.applicationIdentifier, mono: true)
+                }
+                if !app.provision.name.isEmpty {
+                    KeyValueRow(key: "描述文件名", value: app.provision.name)
+                }
+                if let creation = app.provision.creationDate {
+                    KeyValueRow(key: "创建时间", value: humanDate(creation))
+                }
+                if app.provision.expirationDate != nil {
+                    KeyValueRow(key: app.provision.isExpired ? "已过期" : "有效期至",
+                                value: humanDate(app.provision.expirationDate) + expirySuffix,
+                                highlight: app.provision.isExpired)
+                }
+                if app.provision.provisionedDeviceCount > 0 {
+                    KeyValueRow(key: "登记设备数", value: "\(app.provision.provisionedDeviceCount) 台")
+                }
+            }
+        }
+    }
+
+    private var expirySuffix: String {
+        guard let days = app.provision.daysRemaining else { return "" }
+        if days < 0 { return "（已过期 \(-days) 天）" }
+        return "（剩余 \(days) 天）"
+    }
+
     // MARK: - 路径
 
     @ViewBuilder
@@ -117,6 +159,15 @@ struct AppDetailView: View {
         Section(header: Text("二进制与签名")) {
             if !app.architectures.isEmpty {
                 KeyValueRow(key: "架构", value: app.architectures.joined(separator: " / "))
+            }
+            if !app.binaryUUID.isEmpty {
+                KeyValueRow(key: "LC_UUID", value: app.binaryUUID, mono: true)
+            }
+            if !app.buildSDK.isEmpty {
+                KeyValueRow(key: "编译 SDK", value: "iOS " + app.buildSDK)
+            }
+            if !app.binaryMinOS.isEmpty {
+                KeyValueRow(key: "二进制最低版本", value: "iOS " + app.binaryMinOS + "（读自 Mach-O）")
             }
             KeyValueRow(key: "加密 (cryptid)", value: app.encrypted ? "是" : "否")
             if app.sign.hasSignature {
@@ -180,6 +231,17 @@ struct AppDetailView: View {
                     Text(lib)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+
+        if !app.missingLibs.isEmpty {
+            Section(header: Text("缺失依赖（\(app.missingLibs.count)）—— 会导致启动闪退")) {
+                ForEach(app.missingLibs, id: \.self) { lib in
+                    Text(lib)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.red)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
