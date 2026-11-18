@@ -99,8 +99,15 @@ echo "    ---- 编译 SDK / 最低系统 ----"
 otool -l "$APP/$BINARY_NAME" 2>/dev/null | grep -A5 "LC_BUILD_VERSION" | head -8 || true
 
 echo "    ---- 动态库依赖 ----"
-DEPS="$(otool -L "$APP/$BINARY_NAME" 2>/dev/null | tail -n +2 | awk '{print $1}')"
-printf '%s\n' "$DEPS" | sed 's/^/      /'
+DEPS=""
+if [ -f "$APP/$BINARY_NAME" ]; then
+  DEPS="$(otool -L "$APP/$BINARY_NAME" 2>/dev/null | tail -n +2 | awk 'NF{print $1}')" || DEPS=""
+fi
+if [ -n "$DEPS" ]; then
+  printf '%s\n' "$DEPS" | sed 's/^/      /'
+else
+  echo "      （读取失败）"
+fi
 
 # @rpath / @executable_path 形式的依赖必须能在包里找到，否则设备上 dyld 直接拒载
 MISSING=""
@@ -116,14 +123,19 @@ while IFS= read -r dep; do
       [ -f "$APP/$base" ] || MISSING="$MISSING $dep"
       ;;
   esac
-done <<< "$DEPS"
+done <<< "$DEPS" || true
 
 if [ -n "$MISSING" ]; then
   echo "    ${YEL}警告：以下依赖在包内找不到：$MISSING${RST}"
 fi
 
-SWIFT_LIBS="$(ls "$APP/Frameworks" 2>/dev/null | wc -l | tr -d ' ')"
-if [ "$SWIFT_LIBS" -gt 0 ]; then
+# 注意：pipefail 下 ls 一个不存在的目录会让整个管道返回非零，进而被 set -e 杀掉。
+# 所以先判目录存在，不要直接 ls | wc。
+SWIFT_LIBS=0
+if [ -d "$APP/Frameworks" ]; then
+  SWIFT_LIBS="$(ls "$APP/Frameworks" 2>/dev/null | wc -l | tr -d ' ')"
+fi
+if [ "${SWIFT_LIBS:-0}" -gt 0 ]; then
   echo "    Frameworks 内嵌库：$SWIFT_LIBS 个"
 else
   echo "    依赖系统 Swift 运行时（iOS 12.2+ 自带，正常）"
